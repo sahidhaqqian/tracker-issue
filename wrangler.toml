@@ -17,7 +17,7 @@ TZ = "Asia/Jakarta"
 [[d1_databases]]
 binding = "DB"
 database_name = "issue-tracker"
-database_id = "ISI_SETELAH_d1_create"
+database_id = "f05f373f-70be-411d-9c0f-906797b8992c"
 
 # Opsional: simpan screenshot asli. Buat bucket dulu (npx wrangler r2 bucket create issue-screenshots) lalu hapus tanda #
 # [[r2_buckets]]
