@@ -1,3 +1,5 @@
+import { AwsClient } from "aws4fetch";
+
 const STATUSES = ["To Do", "In Progress", "Blocked", "Done"];
 const PRIORITIES = ["High", "Medium", "Low"];
 const MAX_IMG = 5 * 1024 * 1024;
@@ -23,6 +25,38 @@ function checkAuth(req, env) {
   return new Response("Login diperlukan", {
     status: 401, headers: { "www-authenticate": 'Basic realm="Issue Tracker"' },
   });
+}
+
+
+// ---- Penyimpanan screenshot: R2 lewat S3 API (beda akun) atau binding R2 (akun sama) ----
+function s3(env) {
+  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.R2_ACCOUNT_ID) return null;
+  return {
+    client: new AwsClient({ accessKeyId: env.R2_ACCESS_KEY_ID, secretAccessKey: env.R2_SECRET_ACCESS_KEY, service: "s3", region: "auto" }),
+    base: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET || "tracker"}`,
+  };
+}
+const storageOn = (env) => !!(s3(env) || env.BUCKET);
+
+async function putObj(env, key, buf, type) {
+  const c = s3(env);
+  if (c) {
+    const r = await c.client.fetch(`${c.base}/${key}`, { method: "PUT", body: buf, headers: { "content-type": type } });
+    if (!r.ok) throw new Error(`R2 PUT ${r.status}`);
+  } else {
+    await env.BUCKET.put(key, buf, { httpMetadata: { contentType: type } });
+  }
+}
+
+async function getObj(env, key) {
+  const c = s3(env);
+  if (c) {
+    const r = await c.client.fetch(`${c.base}/${key}`);
+    if (!r.ok) return null;
+    return new Response(r.body, { headers: { "content-type": r.headers.get("content-type") || "image/jpeg", "cache-control": "private, max-age=86400" } });
+  }
+  const o = await env.BUCKET.get(key);
+  return o ? new Response(o.body, { headers: { "content-type": o.httpMetadata?.contentType || "image/jpeg" } }) : null;
 }
 
 async function log(env, id, kind, detail = "") {
@@ -76,10 +110,9 @@ async function extract(req, env) {
     const buf = await f.arrayBuffer();
     if (buf.byteLength > MAX_IMG) throw new HttpError(413, "Gambar lebih dari 5MB");
     images.push({ type: f.type, buf });
-    if (env.BUCKET) {
+    if (storageOn(env)) {
       const key = `${Date.now()}-${crypto.randomUUID().slice(0, 6)}.jpg`;
-      await env.BUCKET.put(key, buf, { httpMetadata: { contentType: f.type } });
-      keys.push(key);
+      try { await putObj(env, key, buf, f.type); keys.push(key); } catch (e) { console.log("simpan screenshot gagal:", e.message); }
     }
   }
   if (!images.length) throw new HttpError(400, "Tidak ada gambar");
@@ -182,10 +215,10 @@ async function route(req, env, url) {
   }
   if (p === "/api/report") return report(env);
   if (p === "/api/export.csv") return exportCsv(env);
-  if ((x = p.match(/^\/uploads\/([\w.-]+)$/)) && env.BUCKET) {
-    const o = await env.BUCKET.get(x[1]);
+  if ((x = p.match(/^\/uploads\/([\w.-]+)$/)) && storageOn(env)) {
+    const o = await getObj(env, x[1]);
     if (!o) throw new HttpError(404, "Tidak ada");
-    return new Response(o.body, { headers: { "content-type": o.httpMetadata?.contentType || "image/jpeg" } });
+    return o;
   }
   throw new HttpError(404, "Tidak ditemukan");
 }
