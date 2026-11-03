@@ -76,7 +76,7 @@ Pisahkan menjadi issue/task terpisah. Satu issue = satu pekerjaan yang diminta.
 Abaikan obrolan yang bukan tugas. Gabungkan pesan yang membahas hal yang sama.
 Hari ini: ${today}.
 Balas HANYA dengan JSON array. Tiap elemen:
-{"title":"judul singkat max 80 karakter","summary":"ringkasan 1-2 kalimat","requester":"nama pengirim atau kosong","priority":"High|Medium|Low","deadline":"tanggal/jam jika disebut, jika tidak kosong"}
+{"title":"judul singkat max 80 karakter","summary":"ringkasan 1-2 kalimat","requester":"nama pengirim atau kosong","priority":"High|Medium|Low","deadline":"tanggal/jam jika disebut, jika tidak kosong","deadline_iso":"YYYY-MM-DD HH:MM (WIB) jika deadline bisa dipastikan dari chat, jika tidak kosong"}
 Gunakan bahasa yang sama dengan chat. Jika tidak ada task, balas [].`;
 
 async function askAI(env, images) {
@@ -102,22 +102,54 @@ function parseArray(t) {
   try { const d = JSON.parse(m[0]); return Array.isArray(d) ? d : []; } catch { return []; }
 }
 
+const DL_RE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/;
+const parseDl = (v) => { v = String(v || "").trim(); return DL_RE.test(v) ? v : ""; };
+const hoursAgo = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+async function sha256(buf) {
+  const h = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function delObj(env, key) {
+  const c = s3(env);
+  if (c) await c.client.fetch(`${c.base}/${key}`, { method: "DELETE" });
+  else if (env.BUCKET) await env.BUCKET.delete(key);
+}
+const ORDER = `ORDER BY CASE priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
+  CASE WHEN COALESCE(deadline_at,'')='' THEN 1 ELSE 0 END, deadline_at, id DESC`;
+
 async function extract(req, env) {
   const form = await req.formData();
-  const images = [], keys = [];
+  let images = [], dup = 0;
+  const seen = new Set();
   for (const f of form.getAll("files")) {
     if (typeof f === "string" || !/^image\/(jpeg|png|gif|webp)$/.test(f.type)) continue;
     const buf = await f.arrayBuffer();
     if (buf.byteLength > MAX_IMG) throw new HttpError(413, "Gambar lebih dari 5MB");
-    images.push({ type: f.type, buf });
-    if (storageOn(env)) {
+    const hash = await sha256(buf);
+    if (seen.has(hash)) { dup++; continue; }
+    seen.add(hash);
+    images.push({ type: f.type, buf, hash });
+  }
+  if (!images.length && !dup) throw new HttpError(400, "Tidak ada gambar");
+  if (images.length) {
+    const { results: known } = await env.DB.prepare(
+      `SELECT hash FROM shots WHERE hash IN (${images.map(() => "?").join(",")})`
+    ).bind(...images.map((i) => i.hash)).all();
+    const k = new Set(known.map((r) => r.hash));
+    dup += images.filter((i) => k.has(i.hash)).length;
+    images = images.filter((i) => !k.has(i.hash));
+  }
+  if (!images.length) return json({ added: 0, found: 0, skipped: dup });
+
+  const keys = [];
+  if (storageOn(env)) {
+    for (const i of images) {
       const key = `${Date.now()}-${crypto.randomUUID().slice(0, 6)}.jpg`;
-      try { await putObj(env, key, buf, f.type); keys.push(key); } catch (e) { console.log("simpan screenshot gagal:", e.message); }
+      try { await putObj(env, key, i.buf, i.type); keys.push(key); } catch (e) { console.log("simpan screenshot gagal:", e.message); }
     }
   }
-  if (!images.length) throw new HttpError(400, "Tidak ada gambar");
   const found = parseArray(await askAI(env, images));
-  const { results } = await env.DB.prepare("SELECT title FROM issues WHERE status!='Done'").all();
+  const { results } = await env.DB.prepare("SELECT title FROM issues WHERE status!='Done' OR done_at >= ?").bind(hoursAgo(24 * 7)).all();
   const existing = new Set(results.map((r) => norm(r.title)));
   let added = 0;
   for (const a of found) {
@@ -126,19 +158,32 @@ async function extract(req, env) {
     const pr = PRIORITIES.includes(a.priority) ? a.priority : "Medium";
     const t = nowIso();
     const r = await env.DB.prepare(
-      "INSERT INTO issues(title,summary,requester,priority,deadline,screenshot,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)"
-    ).bind(title.slice(0, 200), a.summary || "", a.requester || "", pr, a.deadline || "", keys.join(","), t, t).run();
+      "INSERT INTO issues(title,summary,requester,priority,deadline,deadline_at,screenshot,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)"
+    ).bind(title.slice(0, 200), a.summary || "", a.requester || "", pr, a.deadline || "", parseDl(a.deadline_iso), keys.join(","), t, t).run();
     await log(env, r.meta.last_row_id, "created", "dari screenshot");
     existing.add(norm(title)); added++;
   }
-  return json({ added, found: found.length });
+  await env.DB.batch(images.map((i) => env.DB.prepare("INSERT OR IGNORE INTO shots(hash,created_at) VALUES(?,?)").bind(i.hash, nowIso())));
+  return json({ added, found: found.length, skipped: dup });
 }
 
 async function listIssues(env) {
   const { results } = await env.DB.prepare(
-    "SELECT * FROM issues ORDER BY CASE priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END, id DESC"
-  ).all();
+    `SELECT * FROM issues WHERE status!='Done' OR done_at >= ? ${ORDER}`
+  ).bind(hoursAgo(36)).all();
   return json(results);
+}
+
+async function archive(url, env) {
+  const q = (url.searchParams.get("q") || "").trim();
+  const off = Math.max(0, parseInt(url.searchParams.get("offset")) || 0);
+  const like = `%${q}%`;
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM issues WHERE status='Done' AND done_at < ?
+     AND (?='' OR title LIKE ? OR summary LIKE ? OR requester LIKE ? OR note LIKE ?)
+     ORDER BY done_at DESC LIMIT 31 OFFSET ?`
+  ).bind(hoursAgo(36), q, like, like, like, like, off).all();
+  return json({ items: results.slice(0, 30), more: results.length > 30 });
 }
 
 async function createIssue(req, env) {
@@ -146,8 +191,8 @@ async function createIssue(req, env) {
   if (!b.title) throw new HttpError(400, "Judul wajib");
   const t = nowIso();
   const r = await env.DB.prepare(
-    "INSERT INTO issues(title,summary,requester,priority,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?)"
-  ).bind(b.title, b.summary || "", b.requester || "", PRIORITIES.includes(b.priority) ? b.priority : "Medium", b.deadline || "", t, t).run();
+    "INSERT INTO issues(title,summary,requester,priority,deadline,deadline_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)"
+  ).bind(b.title, b.summary || "", b.requester || "", PRIORITIES.includes(b.priority) ? b.priority : "Medium", b.deadline || "", parseDl(b.deadline), t, t).run();
   await log(env, r.meta.last_row_id, "created", "manual");
   return json({ id: r.meta.last_row_id });
 }
@@ -162,6 +207,7 @@ async function patchIssue(req, env, id) {
   for (const k of ["title", "summary", "requester", "priority", "deadline", "status", "note"])
     if (b[k] !== undefined && b[k] !== null) data[k] = b[k];
   if (!Object.keys(data).length) return json({ ok: true });
+  if (data.deadline !== undefined) data.deadline_at = parseDl(data.deadline);
   if (data.status && data.status !== old.status) {
     await log(env, id, "status", `${old.status} -> ${data.status}`);
     data.done_at = data.status === "Done" ? nowIso() : null;
@@ -176,7 +222,7 @@ async function patchIssue(req, env, id) {
 async function report(env) {
   const tz = env.TZ || "Asia/Jakarta";
   const today = localDate(nowIso(), tz);
-  const { results } = await env.DB.prepare("SELECT * FROM issues").all();
+  const { results } = await env.DB.prepare("SELECT * FROM issues WHERE status!='Done' OR done_at >= ?").bind(hoursAgo(48)).all();
   const d = new Date().toLocaleDateString("id-ID", { timeZone: tz, day: "numeric", month: "long", year: "numeric" });
   const out = [`*Laporan Akhir Shift - ${d}*`, ""];
   for (const [label, st] of [["Selesai hari ini", "Done"], ["Sedang dikerjakan", "In Progress"], ["Terkendala", "Blocked"], ["Belum dimulai", "To Do"]]) {
@@ -204,8 +250,13 @@ async function route(req, env, url) {
   if ((x = p.match(/^\/api\/issues\/(\d+)$/))) {
     if (m === "PATCH") return patchIssue(req, env, +x[1]);
     if (m === "DELETE") {
+      const row = await env.DB.prepare("SELECT screenshot FROM issues WHERE id=?").bind(+x[1]).first();
       await env.DB.prepare("DELETE FROM events WHERE issue_id=?").bind(+x[1]).run();
       await env.DB.prepare("DELETE FROM issues WHERE id=?").bind(+x[1]).run();
+      for (const key of (row?.screenshot || "").split(",").filter(Boolean)) {
+        const used = await env.DB.prepare("SELECT 1 FROM issues WHERE (',' || screenshot || ',') LIKE ? LIMIT 1").bind(`%,${key},%`).first();
+        if (!used) { try { await delObj(env, key); } catch (e) { console.log("hapus screenshot gagal:", e.message); } }
+      }
       return json({ ok: true });
     }
   }
@@ -213,6 +264,7 @@ async function route(req, env, url) {
     const { results } = await env.DB.prepare("SELECT kind,detail,at FROM events WHERE issue_id=? ORDER BY id").bind(+x[1]).all();
     return json(results);
   }
+  if (p === "/api/archive") return archive(url, env);
   if (p === "/api/report") return report(env);
   if (p === "/api/export.csv") return exportCsv(env);
   if ((x = p.match(/^\/uploads\/([\w.-]+)$/)) && storageOn(env)) {
