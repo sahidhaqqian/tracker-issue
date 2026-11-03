@@ -1,0 +1,11 @@
+{
+  "name": "issue-tracker",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute issue-tracker --remote --file=schema.sql",
+    "db:init:local": "wrangler d1 execute issue-tracker --local --file=schema.sql"
+  },
+  "devDependencies": { "wrangler": "^4.0.0" }
+}

@@ -1,0 +1,26 @@
+name = "issue-tracker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[vars]
+MODEL = "glm-5.3-flash"          # model vision termurah. Alternatif: glm-5.3-flashx, deepseek-v4.1-flash
+AI_BASE_URL = "https://ai.helipod.io/v1"
+TZ = "Asia/Jakarta"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "issue-tracker"
+database_id = "ISI_SETELAH_d1_create"
+
+# Opsional: simpan screenshot asli. Buat bucket dulu (npx wrangler r2 bucket create issue-screenshots) lalu hapus tanda #
+# [[r2_buckets]]
+# binding = "BUCKET"
+# bucket_name = "issue-screenshots"
+
+# Domain sendiri (domain harus sudah ada di akun Cloudflare kamu). Hapus tanda # lalu ganti:
+# routes = [{ pattern = "issue.domainmu.com", custom_domain = true }]
