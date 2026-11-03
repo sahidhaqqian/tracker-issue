@@ -85,7 +85,7 @@ async function askAI(env, images) {
     type: "image_url", image_url: { url: `data:${i.type};base64,${toBase64(i.buf)}` },
   }));
   content.push({ type: "text", text: PROMPT(localDate(nowIso(), env.TZ || "Asia/Jakarta")) });
-  const base = (env.AI_BASE_URL || "https://ai.helipod.io/v1").replace(/\/$/, "");
+  const base = (env.AI_BASE_URL || "https://api.nusagate.com/v1").replace(/\/$/, "");
   const r = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.AI_API_KEY}`, "content-type": "application/json" },
