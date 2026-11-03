@@ -7,5 +7,10 @@
     "db:init": "wrangler d1 execute issue-tracker --remote --file=schema.sql",
     "db:init:local": "wrangler d1 execute issue-tracker --local --file=schema.sql"
   },
-  "devDependencies": { "wrangler": "^4.0.0" }
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20"
+  }
 }

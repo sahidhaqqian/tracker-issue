@@ -10,6 +10,8 @@ run_worker_first = true
 [vars]
 MODEL = "glm-5.3-flash"          # model vision termurah. Alternatif: glm-5.3-flashx, deepseek-v4.1-flash
 AI_BASE_URL = "https://ai.helipod.io/v1"
+R2_ACCOUNT_ID = "7d8b1094d4f37502ce98277ebc2aae0e"
+R2_BUCKET = "tracker"
 TZ = "Asia/Jakarta"
 
 [[d1_databases]]
